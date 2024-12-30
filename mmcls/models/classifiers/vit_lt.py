@@ -7,8 +7,9 @@ from ..heads import MultiLabelClsHead
 from ..utils.augment import Augments
 from .base import BaseClassifier
 
-from timm.models import create_model, apply_test_time_pool, load_checkpoint, is_model, list_models, set_fast_norm
-
+from timm.models import create_model,load_checkpoint, is_model, list_models
+from timm.layers import apply_test_time_pool
+from timm.layers.fast_norm import set_fast_norm
 
 @CLASSIFIERS.register_module()
 class VitClassifier(BaseClassifier):

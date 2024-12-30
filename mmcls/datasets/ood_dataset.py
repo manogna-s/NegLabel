@@ -82,7 +82,13 @@ class OODBaseDataset(Dataset):
     def prepare_data(self, idx):
         results = copy.deepcopy(self.data_infos[idx])
         # sample = Image.open(os.path.join(results['img_prefix'], results['img_info']['filename']))
-        sample = Image.open(results['img_info']['filename'])
+        filename = results['img_info']['filename']
+        #if (not (filename.endswith('.JPEG'))) and filename.startswith('./data/val'):
+            #filename += '.JPEG'
+        if (not (filename.endswith('.jpg'))): #and filename.startswith('./data/ood_data')
+            filename += '.jpg'
+        sample = Image.open(filename)
+        #sample = Image.open(results['img_info']['filename'])
         if sample.mode != 'RGB':
             sample = sample.convert('RGB')
         if self.aug is not None:

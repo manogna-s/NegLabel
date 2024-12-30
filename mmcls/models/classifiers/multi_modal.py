@@ -1,4 +1,5 @@
 import os
+from matplotlib import pyplot as plt
 import torch
 from torch import nn
 import xml.etree.ElementTree as ET
@@ -13,7 +14,7 @@ from ..heads import MultiLabelClsHead
 from ..utils.augment import Augments
 from .base import BaseClassifier
 from .class_names import CLASS_NAME, prompt_templates, adj_prompts_templetes
-
+import utils
 
 @CLASSIFIERS.register_module()
 class CLIPScalableClassifier(BaseClassifier):
@@ -43,6 +44,17 @@ class CLIPScalableClassifier(BaseClassifier):
         self.clip_model.eval()
         self.model = self.clip_model
         self.cls_mode = cls_mode
+        
+        #------------Interpret clip----------------
+        self.activations = []
+        self.feat_type = 'last_layer'
+        if self.feat_type == 'last_layer':
+            handlers = [self.model.visual.transformer.register_forward_hook(self.save_activation)]
+        else:      # keys
+            handlers = [self.model.visual.transformer.resblocks[-1].attn.register_forward_hook(self.get_hook(self.model.visual.transformer.resblocks[-1].attn.in_proj_weight))]
+        
+        self.batch_idx = 0 # for visualization of results
+        #------------Interpret clip----------------
 
 
         if prompt_idx_pos is None:
@@ -166,6 +178,26 @@ class CLIPScalableClassifier(BaseClassifier):
             #     for j in ind_adj[0:int(len(ind_adj)*neg_topk)]:
             #         f.write("{}\n".format(words_adj[j]))
     
+    
+    def get_hook(self, weights):
+
+        def inner_hook(module, input, output):
+            inp = input[1].transpose(1,0)  # all inputs to attn are same, does not matter. Can also do input[0] or input[2] 
+            output_qkv = torch.matmul(inp, weights.transpose(0,1)).detach()  # (B, 197, dim * 3)
+            B, T, _ = output_qkv.shape
+            num_heads = self.model.transformer.resblocks[-1].attn.num_heads
+            output_qkv = output_qkv.reshape(B, T, 3, num_heads, -1 // num_heads).permute(2, 0, 3, 1, 4)
+            k_feats = output_qkv[1].transpose(1, 2).reshape(B, T, -1)
+            self.activations.append(k_feats)
+        
+        return inner_hook
+    
+    def save_activation(self, module, input, output):
+        self.activations.append(output.detach())
+        
+    def clear(self):
+        self.activations = []
+    
     def extract_feat(self, img, stage='neck'):
         raise NotImplementedError
 
@@ -177,6 +209,69 @@ class CLIPScalableClassifier(BaseClassifier):
         with torch.no_grad():
             image_features = self.model.encode_image(img)
             image_features /= image_features.norm(dim=-1, keepdim=True)
+            
+            #------------Interpret clip----------------
+            patch_feats = self.activations[0]
+            if self.feat_type == 'last_layer':
+                patch_feats = patch_feats.permute(1, 0, 2)
+                # add self.model.ln_post() for post-norm features
+            patch_feats = patch_feats[:, 1:]
+            all_flat_features = patch_feats.reshape(-1, patch_feats.shape[-1]).cpu().numpy()  
+            
+            all_flat_features_pt = torch.from_numpy(all_flat_features)
+
+            K = 3
+            threshold_by_negative = True
+            foreground_method = 'svd'
+            num_patches = 196
+            patch_h, patch_w = 14, 14
+            img_size = 224
+            feat_type = 'last_layer'
+            pca_features, foreground_component = utils.get_pca_features(K, foreground_method, all_flat_features, all_flat_features_pt,
+                                                                        threshold_by_negative)
+            
+            number_of_images = img.shape[0]
+            all_fg_indices, _ = utils.get_foreground_background_indices(pca_features, num_patches, number_of_images,
+                                                                        initial_threshold = 0 if threshold_by_negative else 0.4,
+                                                                        foreground_component = foreground_component,
+                                                                        patch_h = patch_h, patch_w = patch_w)
+
+            # for single image
+            # selected_patches = patch_feats[0][all_fg_indices[0].flatten()]
+            # selected_patches = selected_patches @ self.model.visual.proj
+            # patch_logits = selected_patches @ self.text_features_pos.to(torch.float32).T
+            # patch_logits = patch_logits.softmax(dim=-1)
+            # predictions = patch_logits.argmax(dim=-1)
+
+
+            # visualization
+            upscaled_masks = utils.upscale_foreground_masks(all_fg_indices, img_size)
+
+            # takes a while for all cls images
+            overlaid_results, crf_masks = [], []
+
+            for i in range(len(all_fg_indices)):
+                overlaid_result, crf_mask = utils.get_foreground_crf_map(upscaled_mask = upscaled_masks[i], image = img[i],
+                                                                        img_size = img_size, DEFAULT_CRF_PARAMS = (10, 40, 13, 3, 3, 5.0))
+
+                overlaid_results.append(overlaid_result)
+                crf_masks.append(crf_mask)
+
+            crf_masks = np.stack(crf_masks).astype(np.uint8)
+
+            fig, axs = plt.subplots(1, 8, figsize=(20,10))
+            np.vectorize(lambda ax:ax.axis('off'))(axs)
+            for i in range(8):
+                axs[i].imshow(utils.show_image(img[i]))
+
+            fig, axs = plt.subplots(1, 8, figsize=(20,10))
+            np.vectorize(lambda ax:ax.axis('off'))(axs)
+            for i in range(8):
+                axs[i].imshow(overlaid_results[i])
+            plt.savefig(f'results/interpret_clip/batch_{self.batch_idx}.png')
+            self.batch_idx += 1
+            #------------Interpret clip----------------
+
 
         if self.cls_mode:
             image_features = image_features.to(torch.float32)
