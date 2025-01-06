@@ -17,7 +17,7 @@ import utils
 # plt.style.use(['science','grid'])
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # load CLIP, train and val transforms
-images_path = './data/val1/imagenet-r/'
+images_path = './data/val1/imagenet-val/'
 model_name = "ViT-B/16"
 classifier_folder = "vitb16"
 dst_name = "imagenet"

@@ -15,6 +15,8 @@ from ..utils.augment import Augments
 from .base import BaseClassifier
 from .class_names import CLASS_NAME, prompt_templates, adj_prompts_templetes
 import utils
+import cv2
+import time
 
 @CLASSIFIERS.register_module()
 class CLIPScalableClassifier(BaseClassifier):
@@ -231,10 +233,12 @@ class CLIPScalableClassifier(BaseClassifier):
                                                                         threshold_by_negative)
             
             number_of_images = img.shape[0]
-            all_fg_indices, _ = utils.get_foreground_background_indices(pca_features, num_patches, number_of_images,
+            all_fg_indices,_ = utils.get_foreground_background_indices(pca_features, num_patches, number_of_images,
                                                                         initial_threshold = 0 if threshold_by_negative else 0.4,
                                                                         foreground_component = foreground_component,
                                                                         patch_h = patch_h, patch_w = patch_w)
+            # print("\n\n\nMultimodal")
+            # print(all_fg_indices[:10])    
 
             # for single image
             # selected_patches = patch_feats[0][all_fg_indices[0].flatten()]
@@ -243,7 +247,7 @@ class CLIPScalableClassifier(BaseClassifier):
             # patch_logits = patch_logits.softmax(dim=-1)
             # predictions = patch_logits.argmax(dim=-1)
 
-
+    
             # visualization
             upscaled_masks = utils.upscale_foreground_masks(all_fg_indices, img_size)
 
@@ -251,6 +255,7 @@ class CLIPScalableClassifier(BaseClassifier):
             overlaid_results, crf_masks = [], []
 
             for i in range(len(all_fg_indices)):
+                # print(i, all_fg_indices[i].sum())
                 overlaid_result, crf_mask = utils.get_foreground_crf_map(upscaled_mask = upscaled_masks[i], image = img[i],
                                                                         img_size = img_size, DEFAULT_CRF_PARAMS = (10, 40, 13, 3, 3, 5.0))
 
@@ -258,7 +263,7 @@ class CLIPScalableClassifier(BaseClassifier):
                 crf_masks.append(crf_mask)
 
             crf_masks = np.stack(crf_masks).astype(np.uint8)
-
+            '''
             fig, axs = plt.subplots(1, 8, figsize=(20,10))
             np.vectorize(lambda ax:ax.axis('off'))(axs)
             for i in range(8):
@@ -268,11 +273,86 @@ class CLIPScalableClassifier(BaseClassifier):
             np.vectorize(lambda ax:ax.axis('off'))(axs)
             for i in range(8):
                 axs[i].imshow(overlaid_results[i])
-            plt.savefig(f'results/interpret_clip/batch_{self.batch_idx}.png')
+            plt.savefig(f'results/interpret_clip_imagenet/batch_{self.batch_idx}.png')
             self.batch_idx += 1
+            '''
             #------------Interpret clip----------------
+            #------------Interpret predictions----------------
+            predictions = [] #torch.tensor([])
+            selected_patches=torch.tensor([])
+            print('interpret predictions')
+            for i in range(number_of_images):
+                # print(i, all_fg_indices[i].sum())
+                selected_patchest=(patch_feats[i][all_fg_indices[i].flatten()])
+                selected_patchest = selected_patchest @ self.model.visual.proj
+                selected_patches=torch.cat((selected_patches,(torch.tensor(selected_patchest)).cpu()),dim=0)
+                patch_logits=(selected_patchest.to(torch.float32) @ self.text_features_pos.to(torch.float32).T)
+                patch_logits=patch_logits.softmax(dim=-1)
+                # patch_logits = patch_logits.to(predictions.device)
+                # print(patch_logits.shape)
+                # print(patch_feats[i].shape)
+                # print(selected_patchest.shape)
+                # print(np.sum(all_fg_indices[i]))
+                # print(patch_logits.argmax(dim=-1).shape)
+                # break
+                # predictions = torch.cat((predictions, patch_logits.argmax(dim=-1)), dim=0)
+                predictions.append(patch_logits.argmax(dim=-1))
+            # print(predictions[0])
+            # dfgerf
+            # '''
+            # split_idx_parts = np.cumsum([f.sum() for f in all_fg_indices])[:-1]
+            # pca_features_rem = utils.get_component_feats(selected_patches, 3)
+            # parts = np.split(pca_features_rem, split_idx_parts)
+            # assert len(all_fg_indices) == len(parts) 
+            # segments=[]
+            colored_segments_viz = []
+            # for i in range(len(parts)):
+            #     part = np.zeros((patch_h * patch_w, 3))
+            #     foreground = all_fg_indices[i].reshape(-1)
+            #     background = ~foreground
+            #     part[background] = 0
+            #     part[foreground] = parts[i]
+            #     part = part.reshape(patch_h, patch_w, 3)
+            #     segments.append(part.argmax(axis = -1))
+            #     print(part.argmax(axis = -1), 'parts')
+             
 
+            for i in range(number_of_images):
+                image_to_show = utils.show_image(img[i])
+                unique_indices = torch.unique(predictions[i])
+                # label_to_idx = {label: idx.item() for idx, label in enumerate(unique_indices)}
+                num_classes = len(unique_indices)
+                cmap = plt.cm.get_cmap("tab20", num_classes)
+                colors = cmap(np.arange(num_classes))
+                index_to_color = {idx.item(): colors[j] for j, idx in enumerate(unique_indices)}
+                seg_mask = np.zeros((patch_h, patch_w, 3), dtype=np.uint8)   # (14, 14, 3)
+                segments = np.zeros((patch_h * patch_w,))
+                foreground = all_fg_indices[i].reshape(-1)
+                background = ~foreground
+                segments[background] = 0
+                segments[foreground] = predictions[i].cpu().numpy()
+                segments = segments.reshape(patch_h, patch_w)
+                for label in unique_indices.cpu().numpy():
+                    mask = (segments == label)
+                    seg_mask[mask] = (index_to_color[label.item()][:3]* 255).astype(np.uint8)   #(colors[label][:3] * 255).astype(np.uint8)
+                img_size = image_to_show.shape[0]
+                seg_mask_nst = cv2.resize(seg_mask, (img_size, img_size), interpolation = cv2.INTER_NEAREST)   
+                seg_mask_viz = cv2.resize(seg_mask, (img_size, img_size))
+                if crf_masks[i] is not None:
+                    seg_mask_nst[crf_masks[i] == 0] = 0  
+                    seg_mask_viz[crf_masks[i]== 0] = 0 
+                colored_segments_viz.append(seg_mask_viz) 
 
+            fig, axs = plt.subplots(20, 2, figsize=(10,80))
+            np.vectorize(lambda ax:ax.axis('off'))(axs)
+            images_to_show=min(20,len(img))
+            for i in range(images_to_show):
+                axs[i, 0].imshow(utils.show_image(img[i]))
+                axs[i, 0].set_title(str(i))
+                axs[i, 1].imshow(utils.overlay_segments_on_image(img[i], colored_segments_viz[i]))
+            timestamp = int(time.time()) 
+            fig.savefig(f"output_figure_batch_{timestamp}.png", bbox_inches="tight", dpi=300)
+            # '''
         if self.cls_mode:
             image_features = image_features.to(torch.float32)
             self.text_features_pos = self.text_features_pos.to(torch.float32)

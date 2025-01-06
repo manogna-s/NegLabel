@@ -27,8 +27,8 @@ data = dict(
     id_data=dict(
         name='ImageNet',
         type='TxtDataset',
-        path='./data/val/imagenet-r',
-        data_ann='./data/meta/val_labels.txt',
+        path='./data/val',
+        data_ann='./data/meta/val_labeled.txt',
         pipeline=pipline,
         train_label=None,
     ),
